@@ -12,6 +12,7 @@ type PepeStatus = "idle" | "listening" | "thinking" | "speaking";
 type ProcessResponse = {
   replyText?: string;
   message?: string;
+  audioBase64?: string;
 };
 
 type SpeechRecognitionResultLike = {
@@ -147,7 +148,7 @@ export default function App() {
 
       const nextResponse = data.replyText?.trim() || "";
       setResponse(nextResponse);
-      await speakText(nextResponse);
+      await speakResponse(nextResponse, data.audioBase64);
     } catch (error) {
       const messageText =
         error instanceof Error && error.name === "AbortError"
@@ -359,6 +360,51 @@ export default function App() {
       console.warn("No se pudo iniciar recognition; reintento.", error);
       startListeningWithDelay(1000);
     }
+  }
+
+  async function playAudioBase64(audioBase64: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (!audioBase64.trim()) {
+        resolve(false);
+        return;
+      }
+
+      const dataUrl = `data:audio/mpeg;base64,${audioBase64.trim()}`;
+      const audio = new Audio(dataUrl);
+      audio.preload = "auto";
+
+      const cleanup = (ok: boolean) => {
+        audio.onended = null;
+        audio.onerror = null;
+        resolve(ok);
+      };
+
+      audio.onended = () => cleanup(true);
+      audio.onerror = () => cleanup(false);
+
+      const playPromise = audio.play();
+      if (playPromise) {
+        playPromise.catch(() => cleanup(false));
+      }
+    });
+  }
+
+  async function speakResponse(message: string, audioBase64?: string): Promise<void> {
+    if (audioBase64) {
+      setStatus("speaking");
+      const played = await playAudioBase64(audioBase64);
+
+      if (played) {
+        if (!stopRequestedRef.current) {
+          startListeningWithDelay(1400);
+        } else {
+          setStatus("idle");
+        }
+        return;
+      }
+    }
+
+    await speakText(message);
   }
 
   async function speakText(message: string): Promise<void> {
