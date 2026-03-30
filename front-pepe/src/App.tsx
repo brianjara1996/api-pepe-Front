@@ -4,6 +4,8 @@ import "./App.css";
 const BACKEND_URL =
   import.meta.env.VITE_BACKEND_URL?.replace(/\/$/, "") || "http://localhost:8088";
 const REQUEST_TIMEOUT_MS = 20000;
+const ITALIAN_TECHNICAL_ISSUE_MESSAGE =
+  "In questo momento non sono disponibile per problemi tecnici.";
 
 type PepeStatus = "idle" | "listening" | "thinking" | "speaking";
 
@@ -123,9 +125,10 @@ export default function App() {
 
       console.error(error);
       setErrorMessage(messageText);
-      setStatus("idle");
+      setResponse(ITALIAN_TECHNICAL_ISSUE_MESSAGE);
       setIsConversationActive(false);
       stopRequestedRef.current = true;
+      await speakText(ITALIAN_TECHNICAL_ISSUE_MESSAGE);
     } finally {
       window.clearTimeout(timeoutId);
     }
