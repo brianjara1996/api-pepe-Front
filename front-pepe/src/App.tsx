@@ -62,36 +62,6 @@ function getSpeechRecognitionConstructor() {
 }
 
 
-function getItalianVoice() {
-  const voices = window.speechSynthesis?.getVoices() || [];
-  return voices.find((voice) => voice.lang.toLowerCase().startsWith("it")) || null;
-}
-
-function waitForVoices(timeoutMs = 1200): Promise<void> {
-  return new Promise((resolve) => {
-    if (!window.speechSynthesis) {
-      resolve();
-      return;
-    }
-
-    if (window.speechSynthesis.getVoices().length > 0) {
-      resolve();
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      window.speechSynthesis.onvoiceschanged = null;
-      resolve();
-    }, timeoutMs);
-
-    window.speechSynthesis.onvoiceschanged = () => {
-      window.clearTimeout(timeoutId);
-      window.speechSynthesis.onvoiceschanged = null;
-      resolve();
-    };
-  });
-}
-
 export default function App() {
   const [text, setText] = useState("");
   const [response, setResponse] = useState("");
@@ -112,7 +82,6 @@ export default function App() {
       }
 
       recognitionRef.current?.stop();
-      window.speechSynthesis?.cancel();
     };
   }, []);
 
@@ -160,7 +129,6 @@ export default function App() {
       setResponse(ITALIAN_TECHNICAL_ISSUE_MESSAGE);
       setIsConversationActive(false);
       stopRequestedRef.current = true;
-      await speakText(ITALIAN_TECHNICAL_ISSUE_MESSAGE);
     } finally {
       window.clearTimeout(timeoutId);
     }
@@ -184,7 +152,6 @@ export default function App() {
     }
 
     recognitionRef.current?.stop();
-    window.speechSynthesis?.cancel();
   }
 
   function startListeningWithDelay(delayMs = 700) {
@@ -389,7 +356,7 @@ export default function App() {
     });
   }
 
-  async function speakResponse(message: string, audioBase64?: string): Promise<void> {
+  async function speakResponse(_message: string, audioBase64?: string): Promise<void> {
     if (audioBase64) {
       setStatus("speaking");
       const played = await playAudioBase64(audioBase64);
@@ -404,54 +371,11 @@ export default function App() {
       }
     }
 
-    await speakText(message);
-  }
-
-  async function speakText(message: string): Promise<void> {
-    if (!window.speechSynthesis || !message) {
+    if (!stopRequestedRef.current) {
+      startListeningWithDelay(700);
+    } else {
       setStatus("idle");
-      return;
     }
-
-    await waitForVoices();
-    const italianVoice = getItalianVoice();
-
-    await new Promise<void>((resolve) => {
-      setStatus("speaking");
-
-      const utterance = new SpeechSynthesisUtterance(message);
-      utterance.lang = italianVoice?.lang || "it-IT";
-      utterance.voice = italianVoice;
-      utterance.rate = 0.95;
-
-      const finish = () => {
-        if (!stopRequestedRef.current) {
-          startListeningWithDelay(1400);
-        } else {
-          setStatus("idle");
-        }
-        resolve();
-      };
-
-      utterance.onend = finish;
-      utterance.onerror = () => {
-        console.warn("Speech synthesis failed; retrying once without selected voice.");
-
-        const fallbackUtterance = new SpeechSynthesisUtterance(message);
-        fallbackUtterance.lang = "it-IT";
-        fallbackUtterance.rate = 0.95;
-        fallbackUtterance.onend = finish;
-        fallbackUtterance.onerror = finish;
-
-        window.speechSynthesis.cancel();
-        window.speechSynthesis.resume();
-        window.speechSynthesis.speak(fallbackUtterance);
-      };
-
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.resume();
-      window.speechSynthesis.speak(utterance);
-    });
   }
 
   function handleManualSend(event: FormEvent<HTMLFormElement>) {
