@@ -6,6 +6,8 @@ const BACKEND_URL =
 const REQUEST_TIMEOUT_MS = 20000;
 const ITALIAN_TECHNICAL_ISSUE_MESSAGE =
   "In questo momento non sono disponibile per problemi tecnici.";
+const ITALIAN_SLOW_SEARCH_MESSAGE =
+  "Sto cercando su internet, ma ci sta mettendo troppo. Riprova tra qualche secondo.";
 
 type PepeStatus = "idle" | "listening" | "thinking" | "speaking";
 
@@ -94,6 +96,9 @@ export default function App() {
 
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const slowMessageIntervalId = window.setInterval(() => {
+      setResponse(ITALIAN_SLOW_SEARCH_MESSAGE);
+    }, 5000);
 
     try {
       const res = await fetch(`${BACKEND_URL}/api/text/process`, {
@@ -131,6 +136,7 @@ export default function App() {
       stopRequestedRef.current = true;
     } finally {
       window.clearTimeout(timeoutId);
+      window.clearInterval(slowMessageIntervalId);
     }
   }
 
