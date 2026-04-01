@@ -1,23 +1,104 @@
-import { useRef, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import "./App.css";
 
-const BACKEND_URL = "http://localhost:8088";
+const BACKEND_URL =
+  import.meta.env.VITE_BACKEND_URL?.replace(/\/$/, "") || "http://localhost:8088";
+const REQUEST_TIMEOUT_MS = 20000;
+const ITALIAN_TECHNICAL_ISSUE_MESSAGE =
+  "In questo momento non sono disponibile per problemi tecnici.";
+const ITALIAN_SLOW_SEARCH_MESSAGE =
+  "Sto cercando su internet, ma ci sta mettendo troppo. Riprova tra qualche secondo.";
 
 type PepeStatus = "idle" | "listening" | "thinking" | "speaking";
+
+type ProcessResponse = {
+  replyText?: string;
+  message?: string;
+  audioBase64?: string;
+};
+
+type SpeechRecognitionResultLike = {
+  isFinal: boolean;
+  0: {
+    transcript: string;
+  };
+};
+
+type SpeechRecognitionEventLike = {
+  resultIndex: number;
+  results: SpeechRecognitionResultLike[];
+};
+
+type SpeechRecognitionErrorEventLike = {
+  error?: string;
+};
+
+type SpeechRecognitionLike = {
+  lang: string;
+  interimResults: boolean;
+  maxAlternatives: number;
+  continuous: boolean;
+  onstart: (() => void) | null;
+  onaudiostart: (() => void) | null;
+  onsoundstart: (() => void) | null;
+  onspeechstart: (() => void) | null;
+  onspeechend: (() => void) | null;
+  onresult: ((event: SpeechRecognitionEventLike) => void | Promise<void>) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+  onend: (() => void | Promise<void>) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+type SpeechRecognitionConstructor = new () => SpeechRecognitionLike;
+
+type BrowserWindow = Window & {
+  SpeechRecognition?: SpeechRecognitionConstructor;
+  webkitSpeechRecognition?: SpeechRecognitionConstructor;
+  webkitAudioContext?: typeof AudioContext;
+};
+
+function getSpeechRecognitionConstructor() {
+  const browserWindow = window as BrowserWindow;
+  return browserWindow.SpeechRecognition || browserWindow.webkitSpeechRecognition;
+}
+
 
 export default function App() {
   const [text, setText] = useState("");
   const [response, setResponse] = useState("");
   const [status, setStatus] = useState<PepeStatus>("idle");
   const [isConversationActive, setIsConversationActive] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
-  const recognitionRef = useRef<any>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
   const stopRequestedRef = useRef(false);
   const restartTimeoutRef = useRef<number | null>(null);
 
+  useEffect(() => {
+    return () => {
+      stopRequestedRef.current = true;
+
+      if (restartTimeoutRef.current) {
+        window.clearTimeout(restartTimeoutRef.current);
+      }
+
+      recognitionRef.current?.stop();
+    };
+  }, []);
+
   async function processMessage(message: string) {
-    if (!message) return;
+    const cleanedMessage = message.trim();
+    if (!cleanedMessage) return;
 
     setStatus("thinking");
+    setErrorMessage("");
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const slowMessageIntervalId = window.setInterval(() => {
+      setResponse(ITALIAN_SLOW_SEARCH_MESSAGE);
+    }, 5000);
 
     try {
       const res = await fetch(`${BACKEND_URL}/api/text/process`, {
@@ -25,30 +106,42 @@ export default function App() {
         headers: {
           "Content-Type": "application/json",
         },
+        signal: controller.signal,
         body: JSON.stringify({
-          text: message,
+          text: cleanedMessage,
           profileName: "Brian",
           familyTarget: "Jara",
         }),
       });
 
-      const data = await res.json();
+      const data = (await res.json()) as ProcessResponse;
 
       if (!res.ok) {
-        throw new Error(data?.message || "Errore del backend");
+        throw new Error(data?.message || "Error del backend");
       }
 
-      setResponse(data.replyText || "");
-      await speakText(data.replyText || "");
-    } catch (e) {
-      console.error(e);
-      alert("Errore chiamando il backend");
-      setStatus("idle");
+      const nextResponse = data.replyText?.trim() || "";
+      setResponse(nextResponse);
+      await speakResponse(nextResponse, data.audioBase64);
+    } catch (error) {
+      const messageText =
+        error instanceof Error && error.name === "AbortError"
+          ? "Tiempo de espera agotado. Revisa backend/red y vuelve a intentar."
+          : "Error al conectar con el backend.";
+
+      console.error(error);
+      setErrorMessage(messageText);
+      setResponse(ITALIAN_TECHNICAL_ISSUE_MESSAGE);
       setIsConversationActive(false);
+      stopRequestedRef.current = true;
+    } finally {
+      window.clearTimeout(timeoutId);
+      window.clearInterval(slowMessageIntervalId);
     }
   }
 
   function startConversation() {
+    setErrorMessage("");
     stopRequestedRef.current = false;
     setIsConversationActive(true);
     startListeningWithDelay(300);
@@ -64,20 +157,10 @@ export default function App() {
       restartTimeoutRef.current = null;
     }
 
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // ignore
-      }
-    }
-
-    if ("speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
+    recognitionRef.current?.stop();
   }
 
-  function startListeningWithDelay(delayMs: number = 700) {
+  function startListeningWithDelay(delayMs = 700) {
     if (restartTimeoutRef.current) {
       window.clearTimeout(restartTimeoutRef.current);
     }
@@ -91,8 +174,8 @@ export default function App() {
 
   function playBeep() {
     try {
-      const AudioContextClass =
-        (window as any).AudioContext || (window as any).webkitAudioContext;
+      const browserWindow = window as BrowserWindow;
+      const AudioContextClass = window.AudioContext || browserWindow.webkitAudioContext;
 
       if (!AudioContextClass) return;
 
@@ -116,18 +199,16 @@ export default function App() {
       oscillator.onended = () => {
         audioContext.close();
       };
-    } catch (e) {
-      console.warn("Beep non disponibile", e);
+    } catch (error) {
+      console.warn("No fue posible reproducir beep.", error);
     }
   }
 
   function startListening() {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition ||
-      (window as any).webkitSpeechRecognition;
+    const SpeechRecognition = getSpeechRecognitionConstructor();
 
     if (!SpeechRecognition) {
-      alert("Este browser no soporta reconocimiento de voz");
+      setErrorMessage("Tu navegador no soporta reconocimiento de voz.");
       setStatus("idle");
       setIsConversationActive(false);
       return;
@@ -161,37 +242,22 @@ export default function App() {
     function resetSilenceTimer() {
       clearSilenceTimer();
       silenceTimer = window.setTimeout(() => {
-        try {
-          recognition.stop();
-        } catch {
-          // ignore
-        }
+        recognition.stop();
       }, 1800);
     }
 
-    recognition.onstart = () => {
-      resetSilenceTimer();
-    };
+    recognition.onstart = resetSilenceTimer;
+    recognition.onaudiostart = resetSilenceTimer;
+    recognition.onsoundstart = resetSilenceTimer;
+    recognition.onspeechstart = resetSilenceTimer;
 
-    recognition.onaudiostart = () => {
-      resetSilenceTimer();
-    };
-
-    recognition.onsoundstart = () => {
-      resetSilenceTimer();
-    };
-
-    recognition.onspeechstart = () => {
-      resetSilenceTimer();
-    };
-
-    recognition.onresult = async (event: any) => {
+    recognition.onresult = (event) => {
       resetSilenceTimer();
 
       let interim = "";
       let finalPart = "";
 
-      for (let i = event.resultIndex; i < event.results.length; i++) {
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const result = event.results[i];
         const transcriptPiece = result[0]?.transcript || "";
 
@@ -206,23 +272,19 @@ export default function App() {
         finalTranscript += finalPart;
       }
 
-      const shownText = (finalTranscript || "") + (interim || "");
-      lastInterimText = shownText.trim();
-      setText(lastInterimText);
+      const shownText = `${finalTranscript}${interim}`.trim();
+      lastInterimText = shownText;
+      setText(shownText);
     };
 
     recognition.onspeechend = () => {
       clearSilenceTimer();
       silenceTimer = window.setTimeout(() => {
-        try {
-          recognition.stop();
-        } catch {
-          // ignore
-        }
+        recognition.stop();
       }, 900);
     };
 
-    recognition.onerror = (event: any) => {
+    recognition.onerror = (event) => {
       console.warn("SpeechRecognition error:", event?.error);
       clearSilenceTimer();
 
@@ -240,6 +302,7 @@ export default function App() {
         return;
       }
 
+      setErrorMessage("Error detectando audio. Vuelve a intentarlo.");
       setStatus("idle");
     };
 
@@ -266,137 +329,111 @@ export default function App() {
 
     try {
       recognition.start();
-    } catch (e) {
-      console.warn("Recognition start failed, retrying...", e);
+    } catch (error) {
+      console.warn("No se pudo iniciar recognition; reintento.", error);
       startListeningWithDelay(1000);
     }
   }
 
-  function speakText(message: string): Promise<void> {
+  async function playAudioBase64(audioBase64: string): Promise<boolean> {
     return new Promise((resolve) => {
-      if (!("speechSynthesis" in window) || !message) {
-        setStatus("idle");
-        resolve();
+      if (!audioBase64.trim()) {
+        resolve(false);
         return;
       }
 
-      setStatus("speaking");
+      const dataUrl = `data:audio/mpeg;base64,${audioBase64.trim()}`;
+      const audio = new Audio(dataUrl);
+      audio.preload = "auto";
 
-      const utterance = new SpeechSynthesisUtterance(message);
-      utterance.lang = "it-IT";
-      utterance.rate = 0.95;
-
-      utterance.onend = () => {
-        if (!stopRequestedRef.current) {
-          startListeningWithDelay(1400);
-        } else {
-          setStatus("idle");
-        }
-        resolve();
+      const cleanup = (ok: boolean) => {
+        audio.onended = null;
+        audio.onerror = null;
+        resolve(ok);
       };
 
-      utterance.onerror = () => {
-        if (!stopRequestedRef.current) {
-          startListeningWithDelay(1400);
-        } else {
-          setStatus("idle");
-        }
-        resolve();
-      };
+      audio.onended = () => cleanup(true);
+      audio.onerror = () => cleanup(false);
 
-      window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(utterance);
+      const playPromise = audio.play();
+      if (playPromise) {
+        playPromise.catch(() => cleanup(false));
+      }
     });
+  }
+
+  async function speakResponse(_message: string, audioBase64?: string): Promise<void> {
+    if (audioBase64) {
+      setStatus("speaking");
+      const played = await playAudioBase64(audioBase64);
+
+      if (played) {
+        if (!stopRequestedRef.current) {
+          startListeningWithDelay(1400);
+        } else {
+          setStatus("idle");
+        }
+        return;
+      }
+    }
+
+    if (!stopRequestedRef.current) {
+      startListeningWithDelay(700);
+    } else {
+      setStatus("idle");
+    }
+  }
+
+  function handleManualSend(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    stopRequestedRef.current = true;
+    setIsConversationActive(false);
+    void processMessage(text);
   }
 
   function getStatusLabel() {
     switch (status) {
       case "listening":
-        return "Pepe ti ascolta...";
+        return "Pepe te escucha...";
       case "thinking":
-        return "Pepe sta pensando...";
+        return "Pepe está pensando...";
       case "speaking":
-        return "Pepe ti risponde...";
+        return "Pepe te responde...";
       default:
-        return "Pepe è pronto";
+        return "Pepe está listo";
     }
   }
 
   return (
-    <div
-      style={{
-        padding: 40,
-        fontFamily: "Arial, sans-serif",
-        textAlign: "center",
-        minHeight: "100vh",
-        background: "#f6f6f6",
-      }}
-    >
-      <h1 style={{ fontSize: "64px", marginBottom: "10px" }}>Peppe 👴</h1>
-      <h1></h1>
-
-      <div
-        style={{
-          fontSize: "28px",
-          fontWeight: "bold",
-          marginBottom: "30px",
-          color: "#444",
-        }}
-      >
-        {getStatusLabel()}
-      </div>
+    <main className="app">
+      <h1 className="title">Peppe 👴</h1>
+      <p className="status">{getStatusLabel()}</p>
 
       <button
         onClick={isConversationActive ? stopConversation : startConversation}
-        style={{
-          fontSize: "32px",
-          padding: "22px 40px",
-          borderRadius: "20px",
-          border: "none",
-          background: isConversationActive ? "#c0392b" : "#2e86de",
-          color: "white",
-          cursor: "pointer",
-          marginBottom: "30px",
-          minWidth: "320px",
-        }}
+        className={`conversation-button ${isConversationActive ? "stop" : "start"}`}
       >
-        {isConversationActive ? "⏹ Fermar Pepe" : "🎤 Hablar con Pepe"}
+        {isConversationActive ? "⏹ Detener conversación" : "🎤 Hablar con Pepe"}
       </button>
 
-      <div style={{ width: "80%", margin: "0 auto 30px auto" }}>
+      {errorMessage ? <div className="error-banner">{errorMessage}</div> : null}
+
+      <form className="editor" onSubmit={handleManualSend}>
         <textarea
-          placeholder="Ultima frase ascoltata..."
+          placeholder="Última frase escuchada..."
           value={text}
-          onChange={(e) => setText(e.target.value)}
-          style={{
-            width: "100%",
-            height: 120,
-            fontSize: "28px",
-            padding: "16px",
-            borderRadius: "12px",
-            border: "1px solid #ccc",
-            resize: "none",
-          }}
+          onChange={(event) => setText(event.target.value)}
+          aria-label="Mensaje para Pepe"
         />
-      </div>
+        <button type="submit" className="manual-send" disabled={!text.trim() || status === "thinking"}>
+          Enviar texto
+        </button>
+      </form>
 
-      <h2 style={{ fontSize: "42px", marginBottom: "10px" }}>Risposta</h2>
+      <h2 className="subtitle">Respuesta</h2>
+      <section className="response-card">{response || "Pepe te responderá aquí"}</section>
 
-      <div
-        style={{
-          width: "80%",
-          margin: "0 auto",
-          fontSize: "30px",
-          color: "#555",
-          background: "white",
-          borderRadius: "16px",
-          padding: "24px",
-          minHeight: "80px",
-          boxShadow: "0 2px 10px rgba(0,0,0,0.06)",
-        }}
-      >
-        {response || "Pepe ti risponderà qui"}
-      </div>
-    </div>
+      <small className="footnote">Backend actual: {BACKEND_URL}</small>
+    </main>
   );
 }
